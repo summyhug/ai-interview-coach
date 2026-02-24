@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Interview Coach</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a20;
+      --border: #2a2a32;
+      --text: #e8e8ed;
+      --muted: #888;
+      --accent: #6366f1;
+      --accent-hover: #818cf8;
+      --danger: #ef4444;
+      --success: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+    }
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 2rem;
+    }
+    button {
+      padding: 0.75rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 500;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+    .btn-danger {
+      background: var(--danger);
+      color: white;
+    }
+    .btn-danger:hover:not(:disabled) {
+      background: #dc2626;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .recording-indicator {
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      color: var(--danger);
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+    }
+    .recording-indicator.active {
+      display: flex;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .status {
+      margin-bottom: 1rem;
+      padding: 0.75rem;
+      border-radius: 8px;
+      font-size: 0.9rem;
+    }
+    .status.loading {
+      background: rgba(99, 102, 241, 0.15);
+      color: var(--accent);
+    }
+    .status.error {
+      background: rgba(239, 68, 68, 0.15);
+      color: #fca5a5;
+    }
+    .results {
+      margin-top: 2rem;
+    }
+    .section {
+      margin-bottom: 2rem;
+    }
+    .section h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 0.75rem;
+      color: var(--text);
+    }
+    .transcript {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      font-size: 0.9rem;
+    }
+    .turn {
+      margin-bottom: 1rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .turn:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+    .turn-text {
+      margin-bottom: 0.5rem;
+    }
+    .rubric {
+      display: grid;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+    }
+    .rubric-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    .badge.yes { background: rgba(34, 197, 94, 0.2); color: #86efac; }
+    .badge.no { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
+    .rewrite-block {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 0.5rem;
+      font-size: 0.85rem;
+    }
+    .rewrite-block h4 {
+      margin: 0 0 0.5rem 0;
+      font-size: 0.9rem;
+    }
+    .checkbox-wrap {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .checkbox-wrap input { accent-color: var(--accent); }
+    .setup-banner {
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      margin-bottom: 1.5rem;
+    }
+    .setup-banner.warn {
+      background: rgba(234, 179, 8, 0.15);
+      border: 1px solid rgba(234, 179, 8, 0.4);
+      color: #fde047;
+    }
+    .setup-banner.ok {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      color: #86efac;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>AI Interview Coach</h1>
+    <p class="subtitle">Record your interview answers. Get scored feedback and rewrites.</p>
+
+    <div id="setupBanner" class="setup-banner" style="display:none"></div>
+
+    <div class="controls">
+      <button id="btnStart" class="btn-primary">Start Interview</button>
+      <button id="btnStop" class="btn-danger" disabled>End Interview</button>
+    </div>
+
+    <div class="recording-indicator" id="recIndicator">
+      <span class="dot"></span>
+      <span>Recording...</span>
+    </div>
+
+    <div class="checkbox-wrap">
+      <input type="checkbox" id="includeRewrites" checked>
+      <label for="includeRewrites">Include rewrite suggestions (45s + 2min versions)</label>
+    </div>
+
+    <div id="status"></div>
+    <div id="results" class="results"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
