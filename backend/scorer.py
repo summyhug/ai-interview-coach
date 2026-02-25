@@ -1,40 +1,11 @@
-"""Score interview turns and generate rewrites via Ollama."""
+"""Score interview turns and generate rewrites. Uses Gemini (if API key set) or Ollama."""
 
 import json
 import logging
 
-from ollama import chat
+from llm import chat as llm_chat
 
 logger = logging.getLogger(__name__)
-
-# Try models in order; first available wins (prefer larger for better JSON)
-DEFAULT_MODELS = ["qwen2.5", "llama3.1", "llama3.2", "mistral", "llama2"]
-
-
-def _ollama_content(resp) -> str:
-    """Extract content from Ollama chat response."""
-    msg = getattr(resp, "message", None) or (resp.get("message") if hasattr(resp, "get") else None)
-    if not msg:
-        return ""
-    return getattr(msg, "content", "") if not isinstance(msg, dict) else msg.get("content", "")
-
-
-def _resolve_model(preferred: str) -> str:
-    """Use preferred if available, else first available."""
-    try:
-        from ollama import list as ollama_list
-        resp = ollama_list()
-        models = [m.model for m in (resp.models or [])]
-    except Exception:
-        return preferred
-    for m in models:
-        if preferred in m:
-            return m  # use full name e.g. llama3.2:latest
-    for fallback in DEFAULT_MODELS:
-        for m in models:
-            if fallback in m:
-                return m
-    return preferred
 
 
 SCORE_SYSTEM = """You are an expert interview coach. Score each answer turn using this rubric. Return ONLY valid JSON, no markdown or extra text.
@@ -49,9 +20,12 @@ Rubric per turn:
 - long_pauses: Estimated long pauses (0-5 scale)
 - trailing_sentences: Did they trail off or ramble? (true/false)
 - question_type: One of: Behavioral, Product_sense, Technical, Estimation, Motivation, Why_this_job, Tell_me_about, Unknown
-- actionable_feedback: 1-2 sentences on how to improve this answer as a job seeker (interview quality, not speech)"""
+- relevance_to_role: (only when job_description provided) Did the answer connect to the job's requirements? (true/false, note: string)
+- actionable_feedback: 1-2 sentences on how to improve this answer as a job seeker (interview quality, not speech). When job description provided, suggest how to better tailor the answer to the role."""
 
 SCORE_USER_TEMPLATE = """Score these interview answer turns. Each turn is a candidate's spoken response (interviewer questions not included).
+{question_context}
+{job_context}
 
 Turns:
 {turns}
@@ -71,6 +45,7 @@ Return JSON in this exact shape:
       "long_pauses": 0,
       "trailing_sentences": true/false,
       "question_type": "...",
+      "relevance_to_role": {{ "met": true/false, "note": "..." }},
       "actionable_feedback": "..."
     }}
   ],
@@ -134,7 +109,12 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
-def score_turns(segments: list[dict], model: str = "llama3.2") -> dict:
+def score_turns(
+    segments: list[dict],
+    model: str = "llama3.2",
+    question_text: str | None = None,
+    job_description: str | None = None,
+) -> dict:
     """Score each turn via Ollama. Returns parsed JSON or fallback structure."""
     turns_text = "\n".join(
         f"Turn {i}: {s['text']}" for i, s in enumerate(segments)
@@ -145,54 +125,105 @@ def score_turns(segments: list[dict], model: str = "llama3.2") -> dict:
             "overall_summary": "No speech detected in the recording.",
         }
 
-    resolved = _resolve_model(model)
-    prompt = SCORE_USER_TEMPLATE.format(turns=turns_text)
+    question_context = ""
+    if question_text and question_text.strip():
+        question_context = f"The interviewer asked: {question_text.strip()}\n"
+
+    job_context = ""
+    if job_description and job_description.strip():
+        job_context = f"""The candidate is applying for this role. Job description:
+{job_description.strip()}
+
+Evaluate whether their answer is relevant and tailored to this opportunity.
+- For "Tell me about yourself": Did they highlight experience aligned with the role? (e.g., API role → mention API/backend work)
+- For "Why do you want this job?": Strong JD relevance expected
+- actionable_feedback should suggest how to better tailor the answer to this role when applicable
+
+"""
+
+    prompt = SCORE_USER_TEMPLATE.format(
+        turns=turns_text,
+        question_context=question_context,
+        job_context=job_context,
+    )
     try:
-        resp = chat(
-            model=resolved,
+        content, provider = llm_chat(
             messages=[
                 {"role": "system", "content": SCORE_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
-            format="json",
+            format_json=True,
         )
-        content = _ollama_content(resp)
-        parsed = _extract_json(content)
+        parsed = _extract_json(content) if content else None
         if not parsed or "turns" not in parsed:
-            logger.warning("Ollama score_turns: invalid JSON (model=%s). Response length=%d", resolved, len(content or ""))
+            logger.warning("LLM score_turns: invalid JSON (provider=%s). Response length=%d", provider, len(content or ""))
         if parsed and "turns" in parsed:
-            # Ensure turn_index and text align with segments
+            # Ensure turn_index and text align with segments; add relevance_to_role if missing
             for i, t in enumerate(parsed.get("turns", [])):
                 t["turn_index"] = i
                 if i < len(segments):
                     t["text"] = segments[i]["text"]
+                if "relevance_to_role" not in t and job_description:
+                    t["relevance_to_role"] = {"met": None, "note": ""}
             return parsed
     except Exception as e:
-        logger.warning("Ollama score_turns failed (model=%s): %s", resolved, e)
+        logger.warning("LLM score_turns failed: %s", e)
 
-    return _fallback_score_structure(segments)
+    return _fallback_score_structure(segments, job_description)
 
 
-def _fallback_score_structure(segments: list[dict]) -> dict:
+def compute_pace(segments: list[dict]) -> list[dict]:
+    """
+    Compute words-per-minute (WPM) for each segment.
+    Returns list of {pace_wpm, pace_rating, pace_feedback} per segment.
+    """
+    result = []
+    for seg in segments:
+        text = seg.get("text", "") or ""
+        start = seg.get("start", 0)
+        end = seg.get("end", start + 1)
+        duration_sec = max(0.01, end - start)
+        word_count = len(text.split())
+        wpm = (word_count / duration_sec) * 60 if duration_sec > 0 else 0
+
+        if wpm > 180:
+            rating, feedback = "too_fast", "You're speaking too quickly. Slowing down will help the interviewer follow your points."
+        elif wpm > 160:
+            rating, feedback = "slightly_fast", "Pace is a bit quick. Consider slowing slightly for clarity."
+        elif 100 <= wpm <= 160:
+            rating, feedback = "good", "Speaking pace is good."
+        elif wpm >= 80:
+            rating, feedback = "slightly_slow", "Pace could be a bit quicker to maintain engagement."
+        else:
+            rating, feedback = "too_slow", "Speaking pace is slow. Try to maintain a more conversational rhythm."
+
+        result.append({"pace_wpm": round(wpm, 1), "pace_rating": rating, "pace_feedback": feedback})
+    return result
+
+
+def _fallback_score_structure(segments: list[dict], job_description: str | None = None) -> dict:
     """Minimal structure when Ollama fails or returns invalid JSON."""
+    turns = []
+    for i, s in enumerate(segments):
+        t = {
+            "turn_index": i,
+            "text": s["text"],
+            "direct_answer_10s": {"met": None, "note": ""},
+            "specific_example": {"met": None, "note": ""},
+            "quantified_impact": {"met": None, "note": ""},
+            "tradeoffs": {"met": None, "note": ""},
+            "crisp_takeaway": {"met": None, "note": ""},
+            "filler_count": 0,
+            "long_pauses": 0,
+            "trailing_sentences": False,
+            "question_type": "Unknown",
+            "actionable_feedback": "Could not score. Set GEMINI_API_KEY for cloud LLM or ensure Ollama is running: ollama serve",
+        }
+        if job_description:
+            t["relevance_to_role"] = {"met": None, "note": ""}
+        turns.append(t)
     return {
-        "turns": [
-            {
-                "turn_index": i,
-                "text": s["text"],
-                "direct_answer_10s": {"met": None, "note": ""},
-                "specific_example": {"met": None, "note": ""},
-                "quantified_impact": {"met": None, "note": ""},
-                "tradeoffs": {"met": None, "note": ""},
-                "crisp_takeaway": {"met": None, "note": ""},
-                "filler_count": 0,
-                "long_pauses": 0,
-                "trailing_sentences": False,
-                "question_type": "Unknown",
-                "actionable_feedback": "Could not score. Ensure Ollama is running and model is available.",
-            }
-            for i, s in enumerate(segments)
-        ],
+        "turns": turns,
         "overall_summary": "Scoring failed. Check Ollama is running: ollama serve",
     }
 
@@ -208,7 +239,6 @@ def get_rewrites(
     if not text.strip():
         return {"tight_45s": "", "expanded_2min": ""}
 
-    resolved = _resolve_model(model)
     prompt = REWRITE_USER_TEMPLATE.format(
         context=context or "(single answer)",
         turn_index=turn_index,
@@ -216,21 +246,19 @@ def get_rewrites(
         question_type=question_type,
     )
     try:
-        resp = chat(
-            model=resolved,
+        content, _ = llm_chat(
             messages=[
                 {"role": "system", "content": REWRITE_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
-            format="json",
+            format_json=True,
         )
-        content = _ollama_content(resp)
-        parsed = _extract_json(content)
+        parsed = _extract_json(content) if content else None
         if parsed:
             return {
                 "tight_45s": parsed.get("tight_45s", ""),
                 "expanded_2min": parsed.get("expanded_2min", ""),
             }
     except Exception as e:
-        logger.warning("Ollama get_rewrites failed: %s", e)
+        logger.warning("LLM get_rewrites failed: %s", e)
     return {"tight_45s": "", "expanded_2min": ""}

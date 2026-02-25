@@ -4,3 +4,6 @@ python-multipart
 faster-whisper
 ollama
 soundfile
+google-generativeai
+edge-tts
+python-dotenv

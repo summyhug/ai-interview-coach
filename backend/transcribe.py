@@ -13,7 +13,7 @@ def _get_model():
     global _whisper_model
     if _whisper_model is None:
         _whisper_model = WhisperModel(
-            "base",
+            "small",  # "base" can miss speech; "small" is more accurate (more RAM)
             device="cpu",
             compute_type="int8",
         )

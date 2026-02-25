@@ -5,13 +5,24 @@ import os
 import shutil
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+# Load .env from project root (gitignored)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass
+
+from fastapi import FastAPI, File, Form, Query, UploadFile, HTTPException
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from questions import DEFAULT_QUESTIONS, adapt_questions
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from transcribe import transcribe_upload
-from scorer import score_turns, get_rewrites
+from scorer import score_turns, get_rewrites, compute_pace
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,24 +41,30 @@ DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 
 def _fallback_scores(segments: list, message: str = "Scoring unavailable") -> dict:
     """Build fallback score structure when Ollama fails."""
+    pace_data = compute_pace(segments)
+    turns = []
+    for i, s in enumerate(segments):
+        t = {
+            "turn_index": i,
+            "text": s["text"],
+            "direct_answer_10s": {"met": None, "note": ""},
+            "specific_example": {"met": None, "note": ""},
+            "quantified_impact": {"met": None, "note": ""},
+            "tradeoffs": {"met": None, "note": ""},
+            "crisp_takeaway": {"met": None, "note": ""},
+            "filler_count": 0,
+            "long_pauses": 0,
+            "trailing_sentences": False,
+            "question_type": "Unknown",
+            "actionable_feedback": message,
+        }
+        if i < len(pace_data):
+            t["pace_wpm"] = pace_data[i]["pace_wpm"]
+            t["pace_rating"] = pace_data[i]["pace_rating"]
+            t["pace_feedback"] = pace_data[i]["pace_feedback"]
+        turns.append(t)
     return {
-        "turns": [
-            {
-                "turn_index": i,
-                "text": s["text"],
-                "direct_answer_10s": {"met": None, "note": ""},
-                "specific_example": {"met": None, "note": ""},
-                "quantified_impact": {"met": None, "note": ""},
-                "tradeoffs": {"met": None, "note": ""},
-                "crisp_takeaway": {"met": None, "note": ""},
-                "filler_count": 0,
-                "long_pauses": 0,
-                "trailing_sentences": False,
-                "question_type": "Unknown",
-                "actionable_feedback": message,
-            }
-            for i, s in enumerate(segments)
-        ],
+        "turns": turns,
         "overall_summary": "Could not score. Ensure Ollama is running: ollama serve",
     }
 
@@ -62,6 +79,8 @@ async def _no_content():
 async def analyze_interview(
     audio: UploadFile = File(...),
     include_rewrites: bool = False,
+    question_text: str | None = Form(None),
+    job_description: str | None = Form(None),
 ):
     """
     Accept audio file, transcribe, score via Ollama, optionally get rewrites.
@@ -84,13 +103,26 @@ async def analyze_interview(
             }
 
         try:
-            scores = score_turns(segments, model=DEFAULT_MODEL)
+            scores = score_turns(
+                segments,
+                model=DEFAULT_MODEL,
+                question_text=question_text,
+                job_description=job_description,
+            )
         except Exception as e:
             logger.warning("Ollama scoring failed: %s", e)
             scores = _fallback_scores(
                 segments,
                 f"Scoring unavailable: {e}. Ensure Ollama is running and model pulled (ollama pull llama3.2).",
             )
+
+        # Add pace scoring to each turn
+        pace_data = compute_pace(segments)
+        for i, turn in enumerate(scores.get("turns", [])):
+            if i < len(pace_data):
+                turn["pace_wpm"] = pace_data[i]["pace_wpm"]
+                turn["pace_rating"] = pace_data[i]["pace_rating"]
+                turn["pace_feedback"] = pace_data[i]["pace_feedback"]
 
         rewrites = []
         if include_rewrites and scores.get("turns"):
@@ -139,28 +171,69 @@ def _is_strong_turn(t: dict) -> bool:
     return met >= 3
 
 
+@app.get("/api/questions")
+async def get_questions():
+    """Return default 10 common questions."""
+    return {"questions": DEFAULT_QUESTIONS.copy()}
+
+
+class AdaptQuestionsRequest(BaseModel):
+    job_description: str = ""
+
+
+@app.post("/api/adapt-questions")
+async def post_adapt_questions(body: AdaptQuestionsRequest):
+    """Adapt questions based on job description. Returns merged list of common + tailored questions."""
+    questions = adapt_questions(body.job_description, model=DEFAULT_MODEL)
+    return {"questions": questions}
+
+
+EDGE_VOICES = [
+    ("en-US-JennyNeural", "Jenny (US, natural)"),
+    ("en-US-GuyNeural", "Guy (US, male)"),
+    ("en-US-SarahNeural", "Sarah (US)"),
+    ("en-GB-SoniaNeural", "Sonia (UK)"),
+]
+
+
+@app.get("/api/tts/voices")
+async def tts_voices():
+    """List available Edge TTS voices."""
+    return {"voices": [{"id": v[0], "label": v[1]} for v in EDGE_VOICES]}
+
+
+@app.get("/api/tts")
+async def text_to_speech(text: str = Query(..., min_length=1), voice: str = Query("en-US-JennyNeural")):
+    """Generate speech from text using edge-tts (Microsoft neural voice). Returns MP3 audio."""
+    try:
+        from tts import generate_speech
+        audio_bytes = generate_speech(text, voice=voice)
+        return Response(content=audio_bytes, media_type="audio/mpeg")
+    except ImportError:
+        raise HTTPException(500, "edge-tts not installed: pip install edge-tts")
+    except Exception as e:
+        logger.warning("TTS failed: %s", e)
+        raise HTTPException(500, str(e))
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
 
 
-@app.get("/api/debug-ollama")
-async def debug_ollama():
-    """Test Ollama connection and raw response."""
-    from ollama import chat
-    from scorer import _ollama_content, _resolve_model
+@app.get("/api/debug-llm")
+async def debug_llm():
+    """Test LLM connection (Gemini or Ollama)."""
+    from llm import chat as llm_chat
 
     try:
-        model = _resolve_model(DEFAULT_MODEL)
-        r = chat(
-            model=model,
+        content, provider = llm_chat(
             messages=[{"role": "user", "content": 'Return only this JSON: {"test": true}'}],
-            format="json",
+            format_json=True,
         )
-        content = _ollama_content(r)
         return {
-            "ok": True,
-            "model": model,
+            "ok": bool(content),
+            "provider": provider,
             "response_preview": (content or "")[:500],
         }
     except Exception as e:
@@ -169,17 +242,23 @@ async def debug_ollama():
 
 @app.get("/api/check")
 async def check_setup():
-    """Verify Ollama and ffmpeg are available."""
-    result = {"ollama": False, "ffmpeg": False, "model": DEFAULT_MODEL}
-    if shutil.which("ffmpeg"):
-        result["ffmpeg"] = True
+    """Verify ffmpeg and LLM (Gemini or Ollama) are available."""
+    from llm import GEMINI_API_KEY
+
+    result = {
+        "ffmpeg": bool(shutil.which("ffmpeg")),
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "ollama": False,
+        "model": os.environ.get("OLLAMA_MODEL", "llama3.2"),
+    }
     try:
         from ollama import list as ollama_list
         resp = ollama_list()
         models = [m.model for m in (resp.models or [])]
-        result["ollama"] = any(DEFAULT_MODEL in m for m in models)
+        result["ollama"] = any(result["model"] in m for m in models)
     except Exception:
         pass
+    result["llm_ready"] = result["gemini_configured"] or result["ollama"]
     return result
 
 

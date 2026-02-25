@@ -40,6 +40,7 @@
       font-size: 0.9rem;
       margin-bottom: 2rem;
     }
+    .muted { color: var(--muted); }
     .controls {
       display: flex;
       gap: 0.75rem;
@@ -136,6 +137,18 @@
     .turn-text {
       margin-bottom: 0.5rem;
     }
+    .transcript-block {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .transcript-full {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      max-height: none;
+    }
     .rubric {
       display: grid;
       gap: 0.5rem;
@@ -190,6 +203,101 @@
       border: 1px solid rgba(34, 197, 94, 0.3);
       color: #86efac;
     }
+    .mode-toggle {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .mode-btn {
+      padding: 0.5rem 1rem;
+      font-size: 0.9rem;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .mode-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+    .guided-setup label, .guided-setup textarea {
+      display: block;
+      margin-bottom: 0.5rem;
+    }
+    .guided-setup textarea {
+      width: 100%;
+      padding: 0.75rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: inherit;
+      resize: vertical;
+    }
+    .guided-setup .btn-load { margin-bottom: 1rem; }
+    .question-list {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      margin: 1rem 0;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .question-list ol { margin: 0; padding-left: 1.25rem; }
+    .question-list li { margin-bottom: 0.5rem; }
+    .add-question {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .add-question input {
+      flex: 1;
+      padding: 0.5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+    }
+    .voice-select-wrap { margin: 1rem 0; }
+    .voice-select-wrap select {
+      padding: 0.5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      min-width: 200px;
+    }
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover:not(:disabled) {
+      background: var(--border);
+    }
+    .guided-active .current-question {
+      font-size: 1.2rem;
+      font-weight: 500;
+      padding: 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin: 1rem 0;
+    }
+    .question-progress { color: var(--muted); font-size: 0.9rem; }
+    .guided-rec-indicator { display: none; margin-bottom: 1rem; }
+    .guided-rec-indicator.active { display: flex; }
+    .guided-controls { display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap; }
+    .guided-feedback { margin-top: 1rem; }
+    .guided-nav { display: flex; gap: 0.5rem; margin-top: 1rem; }
+    .session-summary {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
   </style>
 </head>
 <body>
@@ -199,20 +307,67 @@
 
     <div id="setupBanner" class="setup-banner" style="display:none"></div>
 
-    <div class="controls">
-      <button id="btnStart" class="btn-primary">Start Interview</button>
-      <button id="btnStop" class="btn-danger" disabled>End Interview</button>
+    <div class="mode-toggle">
+      <button id="btnModeGuided" class="mode-btn active">Guided Interview</button>
+      <button id="btnModeFreeform" class="mode-btn">Free-form</button>
     </div>
 
-    <div class="recording-indicator" id="recIndicator">
-      <span class="dot"></span>
-      <span>Recording...</span>
+    <div id="guidedSetup" class="guided-setup">
+      <label for="jobDescription">Job description (optional — adapts questions)</label>
+      <textarea id="jobDescription" rows="4" placeholder="Paste job description to get tailored questions and JD-aware feedback..."></textarea>
+      <button id="btnLoadQuestions" class="btn-primary">Load Questions</button>
+      <div class="voice-select-wrap">
+        <label for="voiceSelect">TTS voice (Edge TTS when available)</label>
+        <select id="voiceSelect">
+          <option value="en-US-JennyNeural">Jenny (US, natural)</option>
+          <option value="en-US-GuyNeural">Guy (US, male)</option>
+          <option value="en-US-SarahNeural">Sarah (US)</option>
+          <option value="en-GB-SoniaNeural">Sonia (UK)</option>
+        </select>
+      </div>
+      <div id="questionList" class="question-list"></div>
+      <div class="add-question">
+        <input type="text" id="addQuestionInput" placeholder="Add your own question">
+        <button id="btnAddQuestion">Add</button>
+      </div>
+      <button id="btnStartGuided" class="btn-primary" disabled>Start Guided Interview</button>
     </div>
 
-    <div class="checkbox-wrap">
-      <input type="checkbox" id="includeRewrites" checked>
-      <label for="includeRewrites">Include rewrite suggestions (45s + 2min versions)</label>
+    <div id="guidedActive" class="guided-active" style="display:none">
+      <div class="question-progress" id="questionProgress">Question 1 of 10</div>
+      <div class="current-question" id="currentQuestion"></div>
+      <div class="recording-indicator guided-rec-indicator" id="guidedRecIndicator">
+        <span class="dot"></span>
+        <span>Recording...</span>
+      </div>
+      <div class="guided-controls">
+        <button id="btnPlayQuestion" class="btn-secondary">Play question</button>
+        <button id="btnStartAnswer" class="btn-primary">Start answering</button>
+        <button id="btnStopAnswer" class="btn-danger" disabled>Stop</button>
+      </div>
+      <div id="guidedFeedback" class="guided-feedback"></div>
+      <div class="guided-nav">
+        <button id="btnTryAgain" class="btn-secondary" style="display:none">Try again</button>
+        <button id="btnNextQuestion" class="btn-primary" style="display:none">Next question</button>
+      </div>
     </div>
+
+    <div id="freeformSection" class="freeform-section" style="display:none">
+      <div class="controls">
+        <button id="btnStart" class="btn-primary">Start Interview</button>
+        <button id="btnStop" class="btn-danger" disabled>End Interview</button>
+      </div>
+      <div class="recording-indicator" id="recIndicator">
+        <span class="dot"></span>
+        <span>Recording...</span>
+      </div>
+      <div class="checkbox-wrap">
+        <input type="checkbox" id="includeRewrites" checked>
+        <label for="includeRewrites">Include rewrite suggestions (45s + 2min versions)</label>
+      </div>
+    </div>
+
+    <div id="sessionSummary" class="session-summary" style="display:none"></div>
 
     <div id="status"></div>
     <div id="results" class="results"></div>

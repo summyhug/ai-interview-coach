@@ -1,23 +1,25 @@
 # AI Interview Coach
 
-Record interview answers, get transcribed and scored by a local LLM. Offline-capable using faster-whisper and Ollama.
+Record interview answers, get transcribed and scored. Guided interview mode with voice questions, per-question feedback, and retry flow.
 
 ## Prerequisites
 
 - Python 3.9+
-- [Ollama](https://ollama.com) installed and running
 - **ffmpeg** (for WebM conversion): `brew install ffmpeg`
 - Microphone for recording
+- **LLM** (choose one):
+  - **Gemini** (faster, cloud): Set `GEMINI_API_KEY` or `GOOGLE_API_KEY`
+  - **Ollama** (local, offline): [Ollama](https://ollama.com) installed and running
 
 ## Setup
 
-1. **Pull an Ollama model** (if not already done):
-
-   ```bash
-   ollama pull llama3.2
-   ```
-
-   Or use `mistral` or another model; set `OLLAMA_MODEL` if different.
+1. **LLM** — Choose one:
+   - **Gemini** (recommended for speed): Get an API key from [Google AI Studio](https://aistudio.google.com/). Create a `.env` file in the project root:
+     ```bash
+     GEMINI_API_KEY=your_key_here
+     ```
+     Or export: `export GEMINI_API_KEY=your_key_here`
+   - **Ollama** (local): `ollama pull llama3.2` and run `ollama serve`
 
 2. **Create a virtual environment and install dependencies**:
 
@@ -58,8 +60,10 @@ Each answer turn is evaluated on:
 
 ## Configuration
 
-- `OLLAMA_MODEL`: Ollama model name (default: `llama3.2`)
-- Whisper model: `base` (in `transcribe.py`) — use `small` for better accuracy, more RAM
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY`: Use Gemini (cloud) for faster scoring. Put in `.env` (gitignored) or export as env var.
+- `OLLAMA_MODEL`: Ollama model name when using local LLM (default: `llama3.2`)
+- `LLM_PROVIDER`: `auto` (try Gemini first) | `gemini` | `ollama`
+- **Voice**: Edge TTS (Microsoft neural voices) used by default; falls back to browser TTS if unavailable
 
 ## Project Structure
 
